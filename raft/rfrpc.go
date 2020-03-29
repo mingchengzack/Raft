@@ -25,13 +25,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// Reset election timer
-	rf.lastReceieve = time.Now()
-
+	// Set reply
 	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
+
 	// Receives stale term request
 	if rf.currentTerm > args.Term {
-		reply.VoteGranted = false
 		return
 	}
 
@@ -45,9 +44,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// and candidate’s log is at least as up-to-date as receiver’s log
 	// grant vote
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
+		rf.votedFor = args.CandidateID
 		reply.VoteGranted = true
-	} else {
-		reply.VoteGranted = false
+
+		// Reset election timer only if GRANTING the vote
+		rf.electionTimer = time.Now()
 	}
 }
 
@@ -69,9 +70,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// Reset election timer
-	rf.lastReceieve = time.Now()
-
 	reply.Term = rf.currentTerm
 	// Receives stale term request
 	if rf.currentTerm > args.Term {
@@ -84,6 +82,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.currentTerm < args.Term {
 		rf.ConvertToFollower(args.Term)
 	}
+
+	// Reset election timer only if receives from CURRENT leader
+	// (i.e term in arguments should not be outdated)
+	rf.electionTimer = time.Now()
 }
 
 // For sending and receiving RPC

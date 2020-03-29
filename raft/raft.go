@@ -67,7 +67,7 @@ const (
 
 	// HeartbeatInterval (ms)
 	// Make sure leader sends heartbeat RPCs no more than ten times per second
-	// 5 times per second
+	// 8 times per second
 	HeartbeatInterval = 120
 )
 
@@ -76,7 +76,7 @@ const (
 // and term received by leader (first index is 1)
 type LogEntry struct {
 	Command interface{}
-	term    int
+	Term    int
 }
 
 // Raft defines a Raft server
@@ -89,8 +89,8 @@ type Raft struct {
 	dead      int32               // set by Kill()
 
 	// Raft server's state
-	state        ServerState
-	lastReceieve time.Time // The last time the server has heard from another peer
+	state         ServerState
+	electionTimer time.Time // The last time the server has heard from another peer
 
 	// Persistent state on this peer
 	currentTerm int        // latest term server has seen (initialized to 0)
@@ -217,7 +217,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Initialization on first boot
 	rf.state = Follower
-	rf.lastReceieve = time.Now()
+	rf.electionTimer = time.Now()
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	go rf.ElectionTimeout()
@@ -232,7 +232,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 // creates the leader election time out in an infinite for loop
 // and performs leader election if randomized election timeouts
 func (rf *Raft) ElectionTimeout() {
-	// Infinite for loop is checks the need for leader election
+	// Periodic check the election timeout for leader election
 	for {
 		// Election timeout is 200 - 400 ms
 		electionTimeout := ElectionInterval + rand.Intn(200)
@@ -247,7 +247,7 @@ func (rf *Raft) ElectionTimeout() {
 		}
 
 		// Check if election timeout
-		if rf.lastReceieve.Before(startTime) {
+		if rf.electionTimer.Before(startTime) {
 			// First time election (Follower)
 			// Re-election (Candidate)
 			if rf.state != Leader {
@@ -264,6 +264,10 @@ func (rf *Raft) LeaderElection() {
 	// Becomes a candidate
 	rf.mu.Lock()
 	rf.ConvertToCandidate()
+	args := &RequestVoteArgs{
+		Term:        rf.currentTerm,
+		CandidateID: rf.me,
+	}
 	votes := 1
 	rf.mu.Unlock()
 
@@ -281,10 +285,6 @@ func (rf *Raft) LeaderElection() {
 				rf.mu.Unlock()
 				return
 			}
-			args := &RequestVoteArgs{
-				Term:        rf.currentTerm,
-				CandidateID: rf.me,
-			}
 			rf.mu.Unlock() // Don't want to lock while sending RPC request
 
 			// Send out request for vote, ok to check if the server replys
@@ -296,6 +296,12 @@ func (rf *Raft) LeaderElection() {
 			// Acquire locks
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
+
+			// Process the reply only when current term doesn't change
+			// and is still a candidate
+			if rf.currentTerm != args.Term || rf.state != Candidate {
+				return
+			}
 
 			// If RPC request or response contains term T > currentTerm:
 			// set currentTerm = T, convert to follower
@@ -309,16 +315,16 @@ func (rf *Raft) LeaderElection() {
 				votes++
 			}
 
-			// Candidate has majority of votes
-			if votes > len(rf.peers)/2 && rf.state == Candidate {
+			// Candidate has majority of votes becomes leader
+			if votes > len(rf.peers)/2 {
 				rf.ConvertToLeader()
 
 				// Act as a leader for each peer server
-				for p := 0; p < len(rf.peers); p++ {
-					if p == rf.me {
+				for s := 0; s < len(rf.peers); s++ {
+					if s == rf.me {
 						continue
 					}
-					go rf.PerformLeader(p)
+					go rf.PerformLeader(s)
 				}
 			}
 		}(p)
@@ -331,25 +337,25 @@ func (rf *Raft) LeaderElection() {
 // Send out heartbeat to other servers
 // Handle commands sent by clients
 func (rf *Raft) PerformLeader(server int) {
-	// Infinite loop to performs leader task
+	// Performs periodic leader task
 	for {
-		// Stop if current server stop being a leader
+		// Stop if current server stop being a leader or is dead
 		rf.mu.Lock()
-		if rf.state != Leader {
+		if rf.killed() || rf.state != Leader {
 			rf.mu.Unlock()
 			return
 		}
 		rf.mu.Unlock()
 
 		// Send heartbeat to given server in interval
-		go rf.HandleAppendEntries(server)
+		go rf.SendAppendEntries(server)
 		time.Sleep(time.Duration(HeartbeatInterval) * time.Millisecond)
 	}
 
 }
 
-// HandleAppendEntries is the sender goroutine for sending AppendEntries RPC
-func (rf *Raft) HandleAppendEntries(server int) {
+// SendAppendEntries is the sender goroutine for sending AppendEntries RPC
+func (rf *Raft) SendAppendEntries(server int) {
 	// Send RPC request
 	rf.mu.Lock()
 	args := &AppendEntriesArgs{
@@ -359,6 +365,7 @@ func (rf *Raft) HandleAppendEntries(server int) {
 	}
 	reply := &AppendEntriesReply{}
 	rf.mu.Unlock() // Don't want to lock while sending RPC request
+
 	if ok := rf.sendAppendEntries(server, args, reply); !ok {
 		return
 	}
@@ -366,6 +373,11 @@ func (rf *Raft) HandleAppendEntries(server int) {
 	// Acquire locks
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	// Process the reply only when current term doesn't change
+	if rf.currentTerm != args.Term {
+		return
+	}
 
 	// If RPC request or response contains term T > currentTerm:
 	// set currentTerm = T, convert to follower
@@ -381,7 +393,7 @@ func (rf *Raft) ConvertToFollower(term int) {
 	rf.state = Follower
 	rf.currentTerm = term
 	rf.votedFor = -1
-	rf.lastReceieve = time.Now()
+	rf.electionTimer = time.Now()
 }
 
 // ConvertToCandidate converts the server to a candidate
@@ -393,12 +405,12 @@ func (rf *Raft) ConvertToCandidate() {
 	rf.state = Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	rf.lastReceieve = time.Now()
+	rf.electionTimer = time.Now()
 }
 
 // ConvertToLeader converts the server to a leader
 // Assuming lock is acquired
 func (rf *Raft) ConvertToLeader() {
 	rf.state = Leader
-	rf.lastReceieve = time.Now()
+	rf.electionTimer = time.Now()
 }
