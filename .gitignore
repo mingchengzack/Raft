@@ -7,3 +7,5 @@ mrtmp.*
 /kvpaxos/x.txt
 *.so
 .DS_Store
+tester
+test-*

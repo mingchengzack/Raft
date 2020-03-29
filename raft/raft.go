@@ -96,6 +96,10 @@ type Raft struct {
 	currentTerm int        // latest term server has seen (initialized to 0)
 	votedFor    int        // candidateId that received vote in current term
 	log         []LogEntry // Log entries (commands and term)
+
+	// Volatile state on all servers
+
+	// Volatile state on leaders
 }
 
 // GetState returns currentTerm and whether this server
@@ -346,21 +350,22 @@ func (rf *Raft) PerformLeader(server int) {
 			rf.mu.Unlock()
 			return
 		}
+		term := rf.currentTerm
 		rf.mu.Unlock()
 
 		// Send heartbeat to given server in interval
-		go rf.SendAppendEntries(server)
+		go rf.SendAppendEntries(server, term)
 		time.Sleep(time.Duration(HeartbeatInterval) * time.Millisecond)
 	}
 
 }
 
 // SendAppendEntries is the sender goroutine for sending AppendEntries RPC
-func (rf *Raft) SendAppendEntries(server int) {
+func (rf *Raft) SendAppendEntries(server, term int) {
 	// Send RPC request
 	rf.mu.Lock()
 	args := &AppendEntriesArgs{
-		Term:     rf.currentTerm,
+		Term:     term,
 		LeaderID: rf.me,
 		Entries:  nil,
 	}
