@@ -70,16 +70,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	// Set reply
 	reply.Term = rf.currentTerm
+	reply.Success = false
+
 	// Receives stale term request
 	if rf.currentTerm > args.Term {
-		reply.Success = false
 		return
 	}
 
-	// If RPC request or response contains term T > currentTerm:
+	// If RPC request or response contains term T > currentTerm
+	// Or it is a candidate and receive heartbeat from leader
 	// set currentTerm = T, convert to follower
-	if rf.currentTerm < args.Term {
+	if rf.currentTerm < args.Term ||
+		(rf.currentTerm == args.Term && rf.state == Candidate) {
 		rf.ConvertToFollower(args.Term)
 	}
 

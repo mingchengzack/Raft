@@ -298,6 +298,7 @@ func (rf *Raft) LeaderElection() {
 			defer rf.mu.Unlock()
 
 			// Process the reply only when current term doesn't change
+			// between sending RPC and receiving RPC
 			// and is still a candidate
 			if rf.currentTerm != args.Term || rf.state != Candidate {
 				return
@@ -375,6 +376,7 @@ func (rf *Raft) SendAppendEntries(server int) {
 	defer rf.mu.Unlock()
 
 	// Process the reply only when current term doesn't change
+	// between sending RPC and receiving RPC
 	if rf.currentTerm != args.Term {
 		return
 	}
@@ -393,7 +395,6 @@ func (rf *Raft) ConvertToFollower(term int) {
 	rf.state = Follower
 	rf.currentTerm = term
 	rf.votedFor = -1
-	rf.electionTimer = time.Now()
 }
 
 // ConvertToCandidate converts the server to a candidate
