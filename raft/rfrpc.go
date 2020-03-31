@@ -8,16 +8,38 @@ import "time"
 
 // RequestVoteArgs defines RequestVote RPC arguments structure
 type RequestVoteArgs struct {
-	Term        int // Candidate's term
-	CandidateID int // Candidate that is requesting vote
-
-	// LastLogIndex and LastLogTerm
+	Term         int // Candidate's term
+	CandidateID  int // Candidate that is requesting vote
+	LastLogIndex int // Index of candidate’s last log entry
+	LastLogTerm  int // Term of candidate’s last log entry
 }
 
 // RequestVoteReply RequestVote RPC reply structure
 type RequestVoteReply struct {
 	Term        int  // Current term for peers to update itself
 	VoteGranted bool // True means candidate received vote
+}
+
+// isMoreUpToDate is a helper function that determines
+// if current log is more up to date than candidate's
+// Assuming lock is acquired
+func (rf *Raft) isMoreUpToDate(candidateIndex, candidateTerm int) bool {
+	// Current log is empty, no way it's more up to date
+	if len(rf.log) == 0 {
+		return false
+	}
+
+	// If current log is not empty but candidate's is empty
+	if candidateIndex == 0 {
+		return true
+	}
+
+	lastLog := rf.log[len(rf.log)-1]
+	if lastLog.Term == candidateTerm {
+		return lastLog.Index > candidateIndex
+	}
+
+	return lastLog.Term > candidateTerm
 }
 
 // RequestVote defines the RPC handler for requesting vote from peers
@@ -43,7 +65,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// If votedFor is null or candidateId
 	// and candidate’s log is at least as up-to-date as receiver’s log
 	// grant vote
-	if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) &&
+		!rf.isMoreUpToDate(args.LastLogIndex, args.LastLogTerm) {
 		rf.votedFor = args.CandidateID
 		reply.VoteGranted = true
 
@@ -54,15 +77,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 // AppendEntriesArgs defines AppendEntries RPC arguments structure
 type AppendEntriesArgs struct {
-	Term     int        // Leader's term
-	LeaderID int        // Leader's ID
-	Entries  []LogEntry // Log entries to store (empty for heartbeat)
+	Term         int        // Leader's term
+	LeaderID     int        // Leader's ID
+	PrevLogIndex int        // Index of log entry immediately preceding new ones
+	PrevLogTerm  int        // Term of prevLogIndex entry
+	Entries      []LogEntry // Log entries to store (empty for heartbeat)
+	LeaderCommit int        // Leader’s commitIndex
 }
 
 // AppendEntriesReply defines AppendEntries RPC reply structure
 type AppendEntriesReply struct {
 	Term    int  // Current term for leader to update itself
 	Success bool // True if follower contained entry matching prevLogIndex and prevLogTerm
+
+	// Used for efficient roll-back
+	Xterm  int // Term in the conflicting entry (if any)
+	XIndex int // Index of first entry with that conflicting term (if any)
+	XLen   int // Log length
 }
 
 // AppendEntries defines the RPC handler for appending log entry from leader

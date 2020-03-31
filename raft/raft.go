@@ -76,6 +76,7 @@ const (
 // and term received by leader (first index is 1)
 type LogEntry struct {
 	Command interface{}
+	Index   int
 	Term    int
 }
 
@@ -85,21 +86,25 @@ type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
+	me        int                 // This peer's index into peers[]
+	dead      int32               // Set by Kill()
 
 	// Raft server's state
 	state         ServerState
 	electionTimer time.Time // The last time the server has heard from another peer
 
 	// Persistent state on this peer
-	currentTerm int        // latest term server has seen (initialized to 0)
-	votedFor    int        // candidateId that received vote in current term
+	currentTerm int        // Latest term server has seen (initialized to 0)
+	votedFor    int        // CandidateId that received vote in current term
 	log         []LogEntry // Log entries (commands and term)
 
 	// Volatile state on all servers
+	commitIndex int // Index of highest log entry committed (initialized to 0)
+	lastApplied int // Index of highest log entry applied (initialized to 0)
 
 	// Volatile state on leaders
+	nextIndex  []int // For each server, index of the next log entry to send (initialized to leader last log index + 1)
+	matchIndex []int // For each server, index of highest log entry known to be replicated on server (initialized to 0)
 }
 
 // GetState returns currentTerm and whether this server
@@ -224,6 +229,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTimer = time.Now()
 	rf.currentTerm = 0
 	rf.votedFor = -1
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
+
+	// Fire election timeout for leader election
 	go rf.ElectionTimeout()
 
 	// Initialize from state persisted before a crash
@@ -268,10 +279,21 @@ func (rf *Raft) LeaderElection() {
 	// Becomes a candidate
 	rf.mu.Lock()
 	rf.ConvertToCandidate()
-	args := &RequestVoteArgs{
-		Term:        rf.currentTerm,
-		CandidateID: rf.me,
+
+	// Construct RequestVote RPC arguments
+	lastLogIndex := 0
+	lastLogTerm := 0
+	if len(rf.log) != 0 {
+		lastLogIndex = rf.log[len(rf.log)-1].Index
+		lastLogTerm = rf.log[len(rf.log)-1].Term
 	}
+	args := &RequestVoteArgs{
+		Term:         rf.currentTerm,
+		CandidateID:  rf.me,
+		LastLogIndex: lastLogIndex,
+		LastLogTerm:  lastLogTerm,
+	}
+
 	votes := 1
 	rf.mu.Unlock()
 
@@ -339,8 +361,8 @@ func (rf *Raft) LeaderElection() {
 
 // PerformLeader is a background goroutine
 // it performs the tasks the leader needs to do for a peer server
-// Send out heartbeat to other servers
 // Handle commands sent by clients
+// Send out heartbeat and AppendEntries RPC to other servers
 func (rf *Raft) PerformLeader(server int) {
 	// Performs periodic leader task
 	for {
@@ -418,5 +440,16 @@ func (rf *Raft) ConvertToCandidate() {
 // Assuming lock is acquired
 func (rf *Raft) ConvertToLeader() {
 	rf.state = Leader
+
+	// Re-initialize nextIndex and matchIndex
+	lastLogIndex := 0
+	if len(rf.log) != 0 {
+		lastLogIndex = rf.log[len(rf.log)-1].Index
+	}
+	for i := 0; i < len(rf.peers); i++ {
+		rf.nextIndex[i] = lastLogIndex + 1
+		rf.matchIndex[i] = 0
+	}
+
 	rf.electionTimer = time.Now()
 }
