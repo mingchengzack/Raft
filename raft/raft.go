@@ -73,6 +73,7 @@ const (
 
 // LogEntry defines the replicated log entry
 // each entry includes command for state machine
+// and the index for the command in the log
 // and term received by leader (first index is 1)
 type LogEntry struct {
 	Command interface{}
@@ -84,6 +85,7 @@ type LogEntry struct {
 // A Go object implementing a single Raft peer
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	cond      *sync.Cond          // Conditional variables to handle repeated check for certain events
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // This peer's index into peers[]
@@ -122,7 +124,7 @@ func (rf *Raft) GetState() (int, bool) {
 
 // persist saves Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
+// see paper's Figure 2 for a description of what should be persistent
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
@@ -170,14 +172,18 @@ func (rf *Raft) readPersist(data []byte) {
 //
 
 // Start starts the
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
+	index = -1
+	term = -1
+	isLeader = true
 
-	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.killed() || rf.state != Leader {
+		return
+	}
 
-	return index, term, isLeader
+	return
 }
 
 //
@@ -223,6 +229,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.cond = sync.NewCond(&rf.mu)
 
 	// Initialization on first boot
 	rf.state = Follower
@@ -366,34 +373,41 @@ func (rf *Raft) LeaderElection() {
 func (rf *Raft) PerformLeader(server int) {
 	// Performs periodic leader task
 	for {
-		// Stop if current server stop being a leader or is dead
 		rf.mu.Lock()
+
+		// Stop if current server stop being a leader or is dead
 		if rf.killed() || rf.state != Leader {
 			rf.mu.Unlock()
 			return
 		}
-		term := rf.currentTerm
+
+		prevLogTerm := 0
+		prevLogIndex := rf.nextIndex[server] - 1
+		if prevLogIndex != 0 {
+			prevLogTerm = rf.log[prevLogIndex-1].Term
+		}
+		args := &AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderID:     rf.me,
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  prevLogTerm,
+			Entries:      nil,
+			LeaderCommit: rf.commitIndex,
+		}
 		rf.mu.Unlock()
 
 		// Send heartbeat to given server in interval
-		go rf.SendAppendEntries(server, term)
+		go rf.SendAppendEntries(server, args)
 		time.Sleep(time.Duration(HeartbeatInterval) * time.Millisecond)
 	}
 
 }
 
 // SendAppendEntries is the sender goroutine for sending AppendEntries RPC
-func (rf *Raft) SendAppendEntries(server, term int) {
+func (rf *Raft) SendAppendEntries(server int, args *AppendEntriesArgs) {
 	// Send RPC request
-	rf.mu.Lock()
-	args := &AppendEntriesArgs{
-		Term:     term,
-		LeaderID: rf.me,
-		Entries:  nil,
-	}
+	// Don't want to lock while sending RPC request
 	reply := &AppendEntriesReply{}
-	rf.mu.Unlock() // Don't want to lock while sending RPC request
-
 	if ok := rf.sendAppendEntries(server, args, reply); !ok {
 		return
 	}

@@ -21,7 +21,7 @@ type RequestVoteReply struct {
 }
 
 // isMoreUpToDate is a helper function that determines
-// if current log is more up to date than candidate's
+// if Raft's log is more up to date than candidate's
 // Assuming lock is acquired
 func (rf *Raft) isMoreUpToDate(candidateIndex, candidateTerm int) bool {
 	// Current log is empty, no way it's more up to date
@@ -96,6 +96,37 @@ type AppendEntriesReply struct {
 	XLen   int // Log length
 }
 
+// contains is a helper function that checks if Raft's log
+// contains an entry at prevLogIndex whose term matches prevLogTerm from leader
+// it also set reply's params that help with efficient roll-back if not contains
+func (rf *Raft) contains(prevLogIndex, prevLogTerm int, reply *AppendEntriesReply) bool {
+	// Try to add the first log entry from leader's view
+	if prevLogIndex == 0 {
+		return true
+	}
+
+	// prevLogIndex points beyond the end of the log
+	if len(rf.log) < prevLogIndex {
+		return false
+	}
+
+	// Conflicting term
+	if term := rf.log[prevLogIndex-1].Term; term != prevLogTerm {
+		reply.Xterm = term
+
+		// Find index of first entry with that confliting term
+		i := prevLogIndex - 1
+		for i > 0 && rf.log[i-1].Term == term {
+			i--
+		}
+		reply.XIndex = rf.log[i].Index
+
+		return false
+	}
+
+	return true
+}
+
 // AppendEntries defines the RPC handler for appending log entry from leader
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
@@ -104,6 +135,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Set reply
 	reply.Term = rf.currentTerm
 	reply.Success = false
+	reply.Xterm = 0
+	reply.XIndex = 0
+	reply.XLen = len(rf.log)
 
 	// Receives stale term request
 	if rf.currentTerm > args.Term {
@@ -121,6 +155,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Reset election timer only if receives from CURRENT leader
 	// (i.e term in arguments should not be outdated)
 	rf.electionTimer = time.Now()
+
+	// Check if log contains an entry at prevLogIndex
+	// whose term matches prevLogTerm
+	if !rf.contains(args.PrevLogIndex, args.PrevLogTerm, reply) {
+		return
+	}
 }
 
 // For sending and receiving RPC
