@@ -34,12 +34,14 @@ func (rf *Raft) isMoreUpToDate(candidateIndex, candidateTerm int) bool {
 		return true
 	}
 
-	lastLog := rf.log[len(rf.log)-1]
-	if lastLog.Term == candidateTerm {
-		return lastLog.Index > candidateIndex
+	// If term is equal compare index
+	// otherwise compare term
+	lastLogIndex, lastLogTerm := rf.getLastLog()
+	if lastLogTerm == candidateTerm {
+		return lastLogIndex > candidateIndex
 	}
 
-	return lastLog.Term > candidateTerm
+	return lastLogTerm > candidateTerm
 }
 
 // RequestVote defines the RPC handler for requesting vote from peers
@@ -59,7 +61,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// If RPC request or response contains term T > currentTerm:
 	// set currentTerm = T, convert to follower
 	if rf.currentTerm < args.Term {
-		rf.ConvertToFollower(args.Term)
+		rf.convertToFollower(args.Term)
 	}
 
 	// If votedFor is null or candidateId
@@ -99,6 +101,7 @@ type AppendEntriesReply struct {
 // contains is a helper function that checks if Raft's log
 // contains an entry at prevLogIndex whose term matches prevLogTerm from leader
 // it also set reply's params that help with efficient roll-back if not contains
+// Assuming log index is the current position in log (no snapshot)
 func (rf *Raft) contains(prevLogIndex, prevLogTerm int, reply *AppendEntriesReply) bool {
 	// Try to add the first log entry from leader's view
 	if prevLogIndex == 0 {
@@ -149,7 +152,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// set currentTerm = T, convert to follower
 	if rf.currentTerm < args.Term ||
 		(rf.currentTerm == args.Term && rf.state == Candidate) {
-		rf.ConvertToFollower(args.Term)
+		rf.convertToFollower(args.Term)
 	}
 
 	// Reset election timer only if receives from CURRENT leader

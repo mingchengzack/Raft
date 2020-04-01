@@ -242,7 +242,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, len(peers))
 
 	// Fire election timeout for leader election
-	go rf.ElectionTimeout()
+	go rf.electionTimeout()
 
 	// Initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -250,10 +250,35 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-// ElectionTimeout is the background goroutine that
+// getLastLog is a helper function that gets the last log's index and term
+// If log is empty return (0, 0)
+// Assuming log index is the current position in log (no snapshot)
+func (rf *Raft) getLastLog() (lastLogIndex, lastLogTerm int) {
+	lastLogIndex = 0
+	lastLogTerm = 0
+	if len(rf.log) != 0 {
+		lastLogIndex = rf.log[len(rf.log)-1].Index
+		lastLogTerm = rf.log[len(rf.log)-1].Term
+	}
+	return
+}
+
+// getPrevLog is a helper function that gets the prev log for a
+// sever preceding the new ones needed to send
+// Assuming log index is the current position in log (no snapshot)
+func (rf *Raft) getPrevLog(server int) (prevLogIndex, prevLogTerm int) {
+	prevLogIndex = rf.nextIndex[server] - 1
+	prevLogTerm = 0
+	if prevLogIndex != 0 {
+		prevLogTerm = rf.log[prevLogIndex-1].Term
+	}
+	return
+}
+
+// electionTimeout is the background goroutine that
 // creates the leader election time out in an infinite for loop
 // and performs leader election if randomized election timeouts
-func (rf *Raft) ElectionTimeout() {
+func (rf *Raft) electionTimeout() {
 	// Periodic check the election timeout for leader election
 	for {
 		// Election timeout is 200 - 400 ms
@@ -273,7 +298,7 @@ func (rf *Raft) ElectionTimeout() {
 			// First time election (Follower)
 			// Re-election (Candidate)
 			if rf.state != Leader {
-				go rf.LeaderElection()
+				go rf.leaderElection()
 			}
 		}
 
@@ -281,19 +306,14 @@ func (rf *Raft) ElectionTimeout() {
 	}
 }
 
-// LeaderElection is the goroutine that starts the leader election process
-func (rf *Raft) LeaderElection() {
+// leaderElection is the goroutine that starts the leader election process
+func (rf *Raft) leaderElection() {
 	// Becomes a candidate
 	rf.mu.Lock()
-	rf.ConvertToCandidate()
+	rf.convertToCandidate()
 
 	// Construct RequestVote RPC arguments
-	lastLogIndex := 0
-	lastLogTerm := 0
-	if len(rf.log) != 0 {
-		lastLogIndex = rf.log[len(rf.log)-1].Index
-		lastLogTerm = rf.log[len(rf.log)-1].Term
-	}
+	lastLogIndex, lastLogTerm := rf.getLastLog()
 	args := &RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateID:  rf.me,
@@ -340,7 +360,7 @@ func (rf *Raft) LeaderElection() {
 			// If RPC request or response contains term T > currentTerm:
 			// set currentTerm = T, convert to follower
 			if rf.currentTerm < reply.Term {
-				rf.ConvertToFollower(reply.Term)
+				rf.convertToFollower(reply.Term)
 				return
 			}
 
@@ -351,14 +371,14 @@ func (rf *Raft) LeaderElection() {
 
 			// Candidate has majority of votes becomes leader
 			if votes > len(rf.peers)/2 {
-				rf.ConvertToLeader()
+				rf.convertToLeader()
 
 				// Act as a leader for each peer server
 				for s := 0; s < len(rf.peers); s++ {
 					if s == rf.me {
 						continue
 					}
-					go rf.PerformLeader(s)
+					go rf.performLeader(s)
 				}
 			}
 		}(p)
@@ -366,11 +386,11 @@ func (rf *Raft) LeaderElection() {
 
 }
 
-// PerformLeader is a background goroutine
+// performLeader is a background goroutine
 // it performs the tasks the leader needs to do for a peer server
 // Handle commands sent by clients
 // Send out heartbeat and AppendEntries RPC to other servers
-func (rf *Raft) PerformLeader(server int) {
+func (rf *Raft) performLeader(server int) {
 	// Performs periodic leader task
 	for {
 		rf.mu.Lock()
@@ -381,11 +401,7 @@ func (rf *Raft) PerformLeader(server int) {
 			return
 		}
 
-		prevLogTerm := 0
-		prevLogIndex := rf.nextIndex[server] - 1
-		if prevLogIndex != 0 {
-			prevLogTerm = rf.log[prevLogIndex-1].Term
-		}
+		prevLogIndex, prevLogTerm := rf.getPrevLog(server)
 		args := &AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderID:     rf.me,
@@ -397,14 +413,15 @@ func (rf *Raft) PerformLeader(server int) {
 		rf.mu.Unlock()
 
 		// Send heartbeat to given server in interval
-		go rf.SendAppendEntries(server, args)
+		go rf.performAppendEntries(server, args)
 		time.Sleep(time.Duration(HeartbeatInterval) * time.Millisecond)
 	}
 
 }
 
-// SendAppendEntries is the sender goroutine for sending AppendEntries RPC
-func (rf *Raft) SendAppendEntries(server int, args *AppendEntriesArgs) {
+// performAppendEntries is the goroutine for sending AppendEntries RPC
+// and handles the reply from follower for appending log entry
+func (rf *Raft) performAppendEntries(server int, args *AppendEntriesArgs) {
 	// Send RPC request
 	// Don't want to lock while sending RPC request
 	reply := &AppendEntriesReply{}
@@ -412,7 +429,7 @@ func (rf *Raft) SendAppendEntries(server int, args *AppendEntriesArgs) {
 		return
 	}
 
-	// Acquire locks
+	// Acquire lock
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -425,14 +442,14 @@ func (rf *Raft) SendAppendEntries(server int, args *AppendEntriesArgs) {
 	// If RPC request or response contains term T > currentTerm:
 	// set currentTerm = T, convert to follower
 	if rf.currentTerm < reply.Term {
-		rf.ConvertToFollower(reply.Term)
+		rf.convertToFollower(reply.Term)
 		return
 	}
 }
 
 // ConvertToFollower converts the server to a follower
 // Assuming lock is acquired
-func (rf *Raft) ConvertToFollower(term int) {
+func (rf *Raft) convertToFollower(term int) {
 	rf.state = Follower
 	rf.currentTerm = term
 	rf.votedFor = -1
@@ -440,7 +457,7 @@ func (rf *Raft) ConvertToFollower(term int) {
 
 // ConvertToCandidate converts the server to a candidate
 // Assuming lock is acquired
-func (rf *Raft) ConvertToCandidate() {
+func (rf *Raft) convertToCandidate() {
 	// Increment currentTerm
 	// Vote for self
 	// Reset election timer
@@ -452,7 +469,7 @@ func (rf *Raft) ConvertToCandidate() {
 
 // ConvertToLeader converts the server to a leader
 // Assuming lock is acquired
-func (rf *Raft) ConvertToLeader() {
+func (rf *Raft) convertToLeader() {
 	rf.state = Leader
 
 	// Re-initialize nextIndex and matchIndex
