@@ -167,28 +167,38 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// Found matched log
 	// Try to append new log entries
+	reply.Success = true
 	i := args.PrevLogIndex
 	for _, le := range args.Entries {
 		// Append any new entries not already in the log
 		if i >= len(rf.log) {
 			rf.log = append(rf.log, le)
+			DPrintf("[Append Log] [%d] appended %v\n", rf.me, le)
 		} else {
 			// Delete confliting entries and all that follow it
 			if rf.log[i].Term != le.Term {
 				rf.log = rf.log[:i]
 				rf.log = append(rf.log, le)
+				DPrintf("[Append Log] [%d] appended %v\n", rf.me, le)
 			}
 		}
 		i++
 	}
 
-	// Set commitIndex
+	// Set commitIndex for followers to catch up with leader's commit
 	if rf.commitIndex < args.LeaderCommit {
-		if args.LeaderCommit < args.Entries[len(args.Entries)-1].Index {
+		if len(args.Entries) == 0 { // Heartbeat for followers to catch up
 			rf.commitIndex = args.LeaderCommit
-		} else {
-			rf.commitIndex = args.Entries[len(args.Entries)-1].Index
+		} else { // Otherwise take min(leaderCommit, index of last entry)
+			lastNewEntry := args.Entries[len(args.Entries)-1].Index
+			if args.LeaderCommit < lastNewEntry {
+				rf.commitIndex = args.LeaderCommit
+			} else {
+				rf.commitIndex = lastNewEntry
+			}
 		}
+		DPrintf("[Commit] [%d] commitIndex now is %d\n", rf.me, rf.commitIndex)
+		rf.cond.Broadcast()
 	}
 }
 

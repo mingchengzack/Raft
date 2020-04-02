@@ -224,6 +224,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 		Index:   index,
 		Term:    term,
 	}
+	DPrintf("[Start] leader got log entry %v\n", le)
 	go rf.appendLog(le)
 
 	return
@@ -242,6 +243,7 @@ func (rf *Raft) appendLog(le LogEntry) {
 
 	// First append log to self
 	rf.log = append(rf.log, le)
+	DPrintf("[Append Log] leader appended %v\n", le)
 
 	lastLogIndex, _ := rf.getLastLog()
 	nextIndex := append(rf.nextIndex[:0:0], rf.nextIndex...)
@@ -273,7 +275,7 @@ func (rf *Raft) appendLog(le LogEntry) {
 					LeaderID:     rf.me,
 					PrevLogIndex: prevLogIndex,
 					PrevLogTerm:  prevLogTerm,
-					Entries:      rf.log[prevLogIndex : lastLogIndex+1],
+					Entries:      rf.log[prevLogIndex:lastLogIndex],
 					LeaderCommit: rf.commitIndex,
 				}
 				rf.mu.Unlock()
@@ -291,6 +293,7 @@ func (rf *Raft) appendLog(le LogEntry) {
 				// Process the reply only when current term doesn't change
 				// between sending RPC and receiving RPC
 				if rf.currentTerm != args.Term {
+					rf.mu.Unlock()
 					return
 				}
 
@@ -298,28 +301,34 @@ func (rf *Raft) appendLog(le LogEntry) {
 				// set currentTerm = T, convert to follower
 				if rf.currentTerm < reply.Term {
 					rf.convertToFollower(reply.Term)
+					rf.mu.Unlock()
 					return
 				}
 
 				// Success from peer, found matched log
 				if reply.Success {
+					DPrintf("[Append Log] Leader[%d], knows [%d] appended %v\n", rf.me, server, le)
 					// Update nextIndex and matchIndex
 					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+					DPrintf("[Append Log] match index for [%d] is %d\n", server, rf.matchIndex[server])
 					rf.nextIndex[server] = rf.matchIndex[server] + 1
 					replicates++
 
 					// If replicated on majority of peers
 					if replicates > len(rf.peers)/2 {
 						n := rf.matchIndex[server]
+						DPrintf("[Append Log] leader[%d] appened %v to majority\n", rf.me, le)
 
 						// Rules to update commitIndex
 						if n > rf.commitIndex && rf.log[n-1].Term == rf.currentTerm {
 							rf.commitIndex = n
 
+							DPrintf("[Append Log] leader[%d] set commitIndex to %d\n", rf.me, n)
 							// Activate goroutines that check for apply
 							rf.cond.Broadcast()
 						}
 					}
+					rf.mu.Unlock()
 					return
 				}
 
@@ -342,6 +351,7 @@ func (rf *Raft) appendLog(le LogEntry) {
 					}
 				}
 
+				DPrintf("[Append Log] Leader retries for [%d], nextIndex is %d\n", server, rf.nextIndex[server])
 				rf.mu.Unlock()
 				// Retry
 			}
@@ -351,7 +361,10 @@ func (rf *Raft) appendLog(le LogEntry) {
 
 // apply is a goroutine that applies commits to local state machine
 func (rf *Raft) apply(logEntries []LogEntry) {
-
+	for _, le := range logEntries {
+		DPrintf("[Apply] [%d] applied %v\n", rf.me, le)
+		rf.applyCh <- ApplyMsg{CommandValid: true, Command: le.Command, CommandIndex: le.Index}
+	}
 }
 
 //
@@ -413,6 +426,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Fire election timeout for leader election
 	go rf.electionTimeout()
 
+	// Fire check commit goroutine that apply log entries
+	go rf.checkCommit()
+
 	// Initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
@@ -469,7 +485,7 @@ func (rf *Raft) checkCommit() {
 		}
 
 		// Applied log entries to local state
-		rf.apply(rf.log[rf.lastApplied+1 : rf.commitIndex+1])
+		rf.apply(rf.log[rf.lastApplied:rf.commitIndex])
 		rf.lastApplied = rf.commitIndex
 		rf.mu.Unlock()
 	}
@@ -628,31 +644,32 @@ func (rf *Raft) performHeartbeat(server int, args *AppendEntriesArgs) {
 		return
 	}
 
-	// Success from peer, found matched log
-	if reply.Success {
-		// Update nextIndex and matchIndex
-		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-		rf.nextIndex[server] = rf.matchIndex[server] + 1
-	}
+	// // Success from peer, found matched log
+	// if reply.Success {
+	// 	// Update nextIndex and matchIndex
+	// 	rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+	// 	rf.nextIndex[server] = rf.matchIndex[server] + 1
+	// 	return
+	// }
 
-	// Log inconsistent
-	// Peer doesn't have prevLogIndex in its log
-	if reply.Xterm == 0 {
-		rf.nextIndex[server] = reply.XLen
-	} else {
-		rf.nextIndex[server] = reply.XIndex
+	// // Log inconsistent
+	// // Peer doesn't have prevLogIndex in its log
+	// if reply.Xterm == 0 {
+	// 	rf.nextIndex[server] = reply.XLen
+	// } else {
+	// 	rf.nextIndex[server] = reply.XIndex
 
-		// Search the confliting term in log
-		i := len(rf.log) - 1
-		for i >= 0 && rf.log[i].Term != reply.Xterm {
-			i--
-		}
+	// 	// Search the confliting term in log
+	// 	i := len(rf.log) - 1
+	// 	for i >= 0 && rf.log[i].Term != reply.Xterm {
+	// 		i--
+	// 	}
 
-		// Found the term
-		if i >= 0 {
-			rf.nextIndex[server] = rf.log[i].Index
-		}
-	}
+	// 	// Found the term
+	// 	if i >= 0 {
+	// 		rf.nextIndex[server] = rf.log[i].Index
+	// 	}
+	// }
 }
 
 // ConvertToFollower converts the server to a follower
