@@ -63,12 +63,12 @@ const (
 const (
 	// ElectionInterval (ms)
 	// The interval for election timeout
-	ElectionInterval = 200
+	ElectionInterval = 300
 
 	// HeartbeatInterval (ms)
 	// Make sure leader sends heartbeat RPCs no more than ten times per second
 	// 8 times per second
-	HeartbeatInterval = 120
+	HeartbeatInterval = 200
 )
 
 // LogEntry defines the replicated log entry
@@ -218,12 +218,13 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	index = lastLogIndex + 1
 	term = rf.currentTerm
 
-	// Try to append log to log and other server's
+	// Try to append log to itself and other server's
 	le := LogEntry{
 		Command: command,
 		Index:   index,
 		Term:    term,
 	}
+
 	// First append log to self
 	rf.log = append(rf.log, le)
 	DPrintf("[Start] leader appended %v\n", le)
@@ -243,8 +244,6 @@ func (rf *Raft) appendLog(le LogEntry) {
 		return
 	}
 
-	lastLogIndex, _ := rf.getLastLog()
-	nextIndex := append(rf.nextIndex[:0:0], rf.nextIndex...)
 	replicates := 1
 	rf.mu.Unlock()
 
@@ -252,7 +251,7 @@ func (rf *Raft) appendLog(le LogEntry) {
 	// if last log index ≥ nextIndex
 	for p := 0; p < len(rf.peers); p++ {
 		// Excludes itself and last log index < nextIndex
-		if p == rf.me || lastLogIndex < nextIndex[p] {
+		if p == rf.me {
 			continue
 		}
 
@@ -260,9 +259,13 @@ func (rf *Raft) appendLog(le LogEntry) {
 		go func(server int) {
 			// Try sending AppendEntries until success
 			for {
-				// Stop if current server stop being a leader or is dead
+				// Stop if current server stop being a leader
+				// or is dead
+				// or peer is already appended
 				rf.mu.Lock()
-				if rf.killed() || rf.state != Leader {
+				lastLogIndex, _ := rf.getLastLog()
+				if rf.killed() || rf.state != Leader ||
+					lastLogIndex < rf.nextIndex[server] {
 					rf.mu.Unlock()
 					return
 				}
@@ -307,6 +310,10 @@ func (rf *Raft) appendLog(le LogEntry) {
 				// Success from peer, found matched log
 				if reply.Success {
 					// Update nextIndex and matchIndex
+					if args.PrevLogIndex+len(args.Entries) < rf.matchIndex[server] {
+						rf.mu.Unlock()
+						return
+					}
 					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 					DPrintf("[Append Log] Leader[%d], knows [%d] appended %v\n", rf.me, server, le)
 					DPrintf("[Append Log] match index for [%d] is %d\n", server, rf.matchIndex[server])
@@ -349,6 +356,7 @@ func (rf *Raft) appendLog(le LogEntry) {
 
 				DPrintf("[Append Log] Leader retries for [%d], nextIndex is %d\n", server, rf.nextIndex[server])
 				rf.mu.Unlock()
+
 				// Retry
 			}
 		}(p)

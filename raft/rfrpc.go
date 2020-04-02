@@ -187,6 +187,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// Set commitIndex for followers to catch up with leader's commit
 	if rf.commitIndex < args.LeaderCommit {
+		oldCommit := rf.commitIndex
 		if len(args.Entries) == 0 { // Heartbeat for followers to catch up
 			rf.commitIndex = args.LeaderCommit
 		} else { // Otherwise take min(leaderCommit, index of last entry)
@@ -198,7 +199,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 		DPrintf("[Commit] [%d] commitIndex now is %d\n", rf.me, rf.commitIndex)
-		rf.cond.Broadcast()
+		if oldCommit != rf.commitIndex {
+			rf.cond.Broadcast()
+		}
 	}
 }
 
