@@ -307,26 +307,23 @@ func (rf *Raft) appendLog(le LogEntry) {
 
 				// Success from peer, found matched log
 				if reply.Success {
-					DPrintf("[Append Log] Leader[%d], knows [%d] appended %v\n", rf.me, server, le)
 					// Update nextIndex and matchIndex
 					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+					DPrintf("[Append Log] Leader[%d], knows [%d] appended %v\n", rf.me, server, le)
 					DPrintf("[Append Log] match index for [%d] is %d\n", server, rf.matchIndex[server])
 					rf.nextIndex[server] = rf.matchIndex[server] + 1
 					replicates++
 
 					// If replicated on majority of peers
-					if replicates > len(rf.peers)/2 {
-						n := rf.matchIndex[server]
+					// Rules to update commitIndex
+					if n := rf.matchIndex[server]; replicates > len(rf.peers)/2 &&
+						n > rf.commitIndex && rf.log[n-1].Term == rf.currentTerm {
 						DPrintf("[Append Log] leader[%d] appened %v to majority\n", rf.me, le)
+						DPrintf("[Append Log] leader[%d] set commitIndex to %d\n", rf.me, n)
+						rf.commitIndex = n
 
-						// Rules to update commitIndex
-						if n > rf.commitIndex && rf.log[n-1].Term == rf.currentTerm {
-							rf.commitIndex = n
-
-							DPrintf("[Append Log] leader[%d] set commitIndex to %d\n", rf.me, n)
-							// Activate goroutines that check for apply
-							rf.cond.Broadcast()
-						}
+						// Activate goroutines that check for apply
+						rf.cond.Broadcast()
 					}
 					rf.mu.Unlock()
 					return
@@ -591,13 +588,14 @@ func (rf *Raft) sendHeartbeat(server int) {
 			return
 		}
 
+		lastLogIndex, _ := rf.getLastLog()
 		prevLogIndex, prevLogTerm := rf.getPrevLog(server)
 		args := &AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderID:     rf.me,
 			PrevLogIndex: prevLogIndex,
 			PrevLogTerm:  prevLogTerm,
-			Entries:      nil,
+			Entries:      rf.log[prevLogIndex:lastLogIndex],
 			LeaderCommit: rf.commitIndex,
 		}
 		rf.mu.Unlock()
@@ -644,32 +642,62 @@ func (rf *Raft) performHeartbeat(server int, args *AppendEntriesArgs) {
 		return
 	}
 
-	// // Success from peer, found matched log
-	// if reply.Success {
-	// 	// Update nextIndex and matchIndex
-	// 	rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-	// 	rf.nextIndex[server] = rf.matchIndex[server] + 1
-	// 	return
-	// }
+	// Success from peer, found matched log
+	if reply.Success {
+		// Update nextIndex and matchIndex
+		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+		rf.nextIndex[server] = rf.matchIndex[server] + 1
+		DPrintf("[Heartbeat] Leader[%d], knows [%d] matches\n", rf.me, server)
+		DPrintf("[Heartbeat] match index for [%d] is %d\n", server, rf.matchIndex[server])
 
-	// // Log inconsistent
-	// // Peer doesn't have prevLogIndex in its log
-	// if reply.Xterm == 0 {
-	// 	rf.nextIndex[server] = reply.XLen
-	// } else {
-	// 	rf.nextIndex[server] = reply.XIndex
+		// No need to update commit index
+		n := rf.matchIndex[server]
+		if n <= rf.commitIndex {
+			return
+		}
 
-	// 	// Search the confliting term in log
-	// 	i := len(rf.log) - 1
-	// 	for i >= 0 && rf.log[i].Term != reply.Xterm {
-	// 		i--
-	// 	}
+		// Iterate all servers to check replicated number
+		replicates := 1
+		for p := 0; p < len(rf.peers); p++ {
+			if p == rf.me {
+				continue
+			}
+			if rf.matchIndex[p] >= n {
+				replicates++
+			}
+		}
 
-	// 	// Found the term
-	// 	if i >= 0 {
-	// 		rf.nextIndex[server] = rf.log[i].Index
-	// 	}
-	// }
+		// If replicated on majority of peers
+		// Rules to update commitIndex
+		if replicates > len(rf.peers)/2 &&
+			rf.log[n-1].Term == rf.currentTerm {
+			rf.commitIndex = n
+
+			// Activate goroutines that check for apply
+			rf.cond.Broadcast()
+		}
+
+		return
+	}
+
+	// Log inconsistent
+	// Peer doesn't have prevLogIndex in its log
+	if reply.Xterm == 0 {
+		rf.nextIndex[server] = reply.XLen
+	} else {
+		rf.nextIndex[server] = reply.XIndex
+
+		// Search the confliting term in log
+		i := len(rf.log) - 1
+		for i >= 0 && rf.log[i].Term != reply.Xterm {
+			i--
+		}
+
+		// Found the term
+		if i >= 0 {
+			rf.nextIndex[server] = rf.log[i].Index
+		}
+	}
 }
 
 // ConvertToFollower converts the server to a follower
