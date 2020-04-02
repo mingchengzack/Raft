@@ -224,7 +224,9 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 		Index:   index,
 		Term:    term,
 	}
-	DPrintf("[Start] leader got log entry %v\n", le)
+	// First append log to self
+	rf.log = append(rf.log, le)
+	DPrintf("[Start] leader appended %v\n", le)
 	go rf.appendLog(le)
 
 	return
@@ -240,10 +242,6 @@ func (rf *Raft) appendLog(le LogEntry) {
 		rf.mu.Unlock()
 		return
 	}
-
-	// First append log to self
-	rf.log = append(rf.log, le)
-	DPrintf("[Append Log] leader appended %v\n", le)
 
 	lastLogIndex, _ := rf.getLastLog()
 	nextIndex := append(rf.nextIndex[:0:0], rf.nextIndex...)
@@ -270,12 +268,13 @@ func (rf *Raft) appendLog(le LogEntry) {
 				}
 
 				prevLogIndex, prevLogTerm := rf.getPrevLog(server)
+				last, _ := rf.getLastLog()
 				args := &AppendEntriesArgs{
 					Term:         rf.currentTerm,
 					LeaderID:     rf.me,
 					PrevLogIndex: prevLogIndex,
 					PrevLogTerm:  prevLogTerm,
-					Entries:      rf.log[prevLogIndex:lastLogIndex],
+					Entries:      rf.log[prevLogIndex:last],
 					LeaderCommit: rf.commitIndex,
 				}
 				rf.mu.Unlock()
