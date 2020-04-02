@@ -164,6 +164,32 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if !rf.contains(args.PrevLogIndex, args.PrevLogTerm, reply) {
 		return
 	}
+
+	// Found matched log
+	// Try to append new log entries
+	i := args.PrevLogIndex
+	for _, le := range args.Entries {
+		// Append any new entries not already in the log
+		if i >= len(rf.log) {
+			rf.log = append(rf.log, le)
+		} else {
+			// Delete confliting entries and all that follow it
+			if rf.log[i].Term != le.Term {
+				rf.log = rf.log[:i]
+				rf.log = append(rf.log, le)
+			}
+		}
+		i++
+	}
+
+	// Set commitIndex
+	if rf.commitIndex < args.LeaderCommit {
+		if args.LeaderCommit < args.Entries[len(args.Entries)-1].Index {
+			rf.commitIndex = args.LeaderCommit
+		} else {
+			rf.commitIndex = args.Entries[len(args.Entries)-1].Index
+		}
+	}
 }
 
 // For sending and receiving RPC

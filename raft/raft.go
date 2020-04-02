@@ -90,6 +90,7 @@ type Raft struct {
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // This peer's index into peers[]
 	dead      int32               // Set by Kill()
+	applyCh   chan ApplyMsg       // Channel to send apply message
 
 	// Raft server's state
 	state         ServerState
@@ -156,6 +157,31 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
+// getLastLog is a helper function that gets the last log's index and term
+// If log is empty return (0, 0)
+// Assuming log index is the current position in log (no snapshot)
+func (rf *Raft) getLastLog() (lastLogIndex, lastLogTerm int) {
+	lastLogIndex = 0
+	lastLogTerm = 0
+	if len(rf.log) != 0 {
+		lastLogIndex = rf.log[len(rf.log)-1].Index
+		lastLogTerm = rf.log[len(rf.log)-1].Term
+	}
+	return
+}
+
+// getPrevLog is a helper function that gets the prev log for a
+// sever preceding the new ones needed to send
+// Assuming log index is the current position in log (no snapshot)
+func (rf *Raft) getPrevLog(server int) (prevLogIndex, prevLogTerm int) {
+	prevLogIndex = rf.nextIndex[server] - 1
+	prevLogTerm = 0
+	if prevLogIndex != 0 {
+		prevLogTerm = rf.log[prevLogIndex-1].Term
+	}
+	return
+}
+
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -171,19 +197,161 @@ func (rf *Raft) readPersist(data []byte) {
 // the leader.
 //
 
-// Start starts the
+// Start starts the next command sent by client
+// If the server is leader
+// Starts
 func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
-	index = -1
-	term = -1
-	isLeader = true
+	index = 0
+	term = 0
+	isLeader = false
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	// Return false if server is not leader or killed
 	if rf.killed() || rf.state != Leader {
 		return
 	}
 
+	isLeader = true
+	lastLogIndex, _ := rf.getLastLog()
+	index = lastLogIndex + 1
+	term = rf.currentTerm
+
+	// Try to append log to log and other server's
+	le := LogEntry{
+		Command: command,
+		Index:   index,
+		Term:    term,
+	}
+	go rf.appendLog(le)
+
 	return
+}
+
+// appendLog is a goroutine that tries to append log itself
+// and then try to replicate it to other servers
+func (rf *Raft) appendLog(le LogEntry) {
+	rf.mu.Lock()
+
+	// Make sure it's still leader and not dead
+	if rf.killed() || rf.state != Leader {
+		rf.mu.Unlock()
+		return
+	}
+
+	// First append log to self
+	rf.log = append(rf.log, le)
+
+	lastLogIndex, _ := rf.getLastLog()
+	nextIndex := append(rf.nextIndex[:0:0], rf.nextIndex...)
+	replicates := 1
+	rf.mu.Unlock()
+
+	// Send request to each peer to append log entry
+	// if last log index ≥ nextIndex
+	for p := 0; p < len(rf.peers); p++ {
+		// Excludes itself and last log index < nextIndex
+		if p == rf.me || lastLogIndex < nextIndex[p] {
+			continue
+		}
+
+		// Attempts to send AppendEntries RPC to each peer
+		go func(server int) {
+			// Try sending AppendEntries until success
+			for {
+				// Stop if current server stop being a leader or is dead
+				rf.mu.Lock()
+				if rf.killed() || rf.state != Leader {
+					rf.mu.Unlock()
+					return
+				}
+
+				prevLogIndex, prevLogTerm := rf.getPrevLog(server)
+				args := &AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderID:     rf.me,
+					PrevLogIndex: prevLogIndex,
+					PrevLogTerm:  prevLogTerm,
+					Entries:      rf.log[prevLogIndex : lastLogIndex+1],
+					LeaderCommit: rf.commitIndex,
+				}
+				rf.mu.Unlock()
+
+				// Send AppendEntries RPC to peer
+				// Don't want to lock while sending RPC request
+				reply := &AppendEntriesReply{}
+				if ok := rf.sendAppendEntries(server, args, reply); !ok {
+					return
+				}
+
+				// Acquire lock
+				rf.mu.Lock()
+
+				// Process the reply only when current term doesn't change
+				// between sending RPC and receiving RPC
+				if rf.currentTerm != args.Term {
+					return
+				}
+
+				// If RPC request or response contains term T > currentTerm:
+				// set currentTerm = T, convert to follower
+				if rf.currentTerm < reply.Term {
+					rf.convertToFollower(reply.Term)
+					return
+				}
+
+				// Success from peer, found matched log
+				if reply.Success {
+					// Update nextIndex and matchIndex
+					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+					rf.nextIndex[server] = rf.matchIndex[server] + 1
+					replicates++
+
+					// If replicated on majority of peers
+					if replicates > len(rf.peers)/2 {
+						n := rf.matchIndex[server]
+
+						// Rules to update commitIndex
+						if n > rf.commitIndex && rf.log[n-1].Term == rf.currentTerm {
+							rf.commitIndex = n
+
+							// Activate goroutines that check for apply
+							rf.cond.Broadcast()
+						}
+					}
+					return
+				}
+
+				// Log inconsistent
+				// Peer doesn't have prevLogIndex in its log
+				if reply.Xterm == 0 {
+					rf.nextIndex[server] = reply.XLen
+				} else {
+					rf.nextIndex[server] = reply.XIndex
+
+					// Search the confliting term in log
+					i := len(rf.log) - 1
+					for i >= 0 && rf.log[i].Term != reply.Xterm {
+						i--
+					}
+
+					// Found the term
+					if i >= 0 {
+						rf.nextIndex[server] = rf.log[i].Index
+					}
+				}
+
+				rf.mu.Unlock()
+				// Retry
+			}
+		}(p)
+	}
+}
+
+// apply is a goroutine that applies commits to local state machine
+func (rf *Raft) apply(logEntries []LogEntry) {
+
 }
 
 //
@@ -230,6 +398,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.cond = sync.NewCond(&rf.mu)
+	rf.applyCh = applyCh
 
 	// Initialization on first boot
 	rf.state = Follower
@@ -248,31 +417,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	return rf
-}
-
-// getLastLog is a helper function that gets the last log's index and term
-// If log is empty return (0, 0)
-// Assuming log index is the current position in log (no snapshot)
-func (rf *Raft) getLastLog() (lastLogIndex, lastLogTerm int) {
-	lastLogIndex = 0
-	lastLogTerm = 0
-	if len(rf.log) != 0 {
-		lastLogIndex = rf.log[len(rf.log)-1].Index
-		lastLogTerm = rf.log[len(rf.log)-1].Term
-	}
-	return
-}
-
-// getPrevLog is a helper function that gets the prev log for a
-// sever preceding the new ones needed to send
-// Assuming log index is the current position in log (no snapshot)
-func (rf *Raft) getPrevLog(server int) (prevLogIndex, prevLogTerm int) {
-	prevLogIndex = rf.nextIndex[server] - 1
-	prevLogTerm = 0
-	if prevLogIndex != 0 {
-		prevLogTerm = rf.log[prevLogIndex-1].Term
-	}
-	return
 }
 
 // electionTimeout is the background goroutine that
@@ -306,10 +450,42 @@ func (rf *Raft) electionTimeout() {
 	}
 }
 
+// checkCommit is the background goroutine that
+// checks if commitIndex > lastApplied using conditional variables
+// If needs to apply, apply all the log entries to state machine
+func (rf *Raft) checkCommit() {
+	// Periodic loop to check for commit
+	for {
+		// Check the current server is dead
+		rf.mu.Lock()
+		if rf.killed() {
+			rf.mu.Unlock()
+			return
+		}
+
+		// Use conditional variable to check if commitIndex is updated
+		for rf.commitIndex <= rf.lastApplied {
+			rf.cond.Wait() // Should wakes up after commitIndex changes
+		}
+
+		// Applied log entries to local state
+		rf.apply(rf.log[rf.lastApplied+1 : rf.commitIndex+1])
+		rf.lastApplied = rf.commitIndex
+		rf.mu.Unlock()
+	}
+}
+
 // leaderElection is the goroutine that starts the leader election process
 func (rf *Raft) leaderElection() {
-	// Becomes a candidate
 	rf.mu.Lock()
+
+	// Make sure it's not dead
+	if rf.killed() {
+		rf.mu.Unlock()
+		return
+	}
+
+	// Becomes a candidate
 	rf.convertToCandidate()
 
 	// Construct RequestVote RPC arguments
@@ -334,7 +510,7 @@ func (rf *Raft) leaderElection() {
 		go func(server int) {
 			// No longer a candidate just return
 			rf.mu.Lock()
-			if rf.state != Candidate {
+			if rf.killed() || rf.state != Candidate {
 				rf.mu.Unlock()
 				return
 			}
@@ -378,7 +554,7 @@ func (rf *Raft) leaderElection() {
 					if s == rf.me {
 						continue
 					}
-					go rf.performLeader(s)
+					go rf.sendHeartbeat(s)
 				}
 			}
 		}(p)
@@ -387,10 +563,8 @@ func (rf *Raft) leaderElection() {
 }
 
 // performLeader is a background goroutine
-// it performs the tasks the leader needs to do for a peer server
-// Handle commands sent by clients
-// Send out heartbeat and AppendEntries RPC to other servers
-func (rf *Raft) performLeader(server int) {
+// It sends out heartbeat and AppendEntries RPC to other servers
+func (rf *Raft) sendHeartbeat(server int) {
 	// Performs periodic leader task
 	for {
 		rf.mu.Lock()
@@ -412,16 +586,24 @@ func (rf *Raft) performLeader(server int) {
 		}
 		rf.mu.Unlock()
 
-		// Send heartbeat to given server in interval
-		go rf.performAppendEntries(server, args)
+		// Send heartbeat to given server
+		go rf.performHeartbeat(server, args)
 		time.Sleep(time.Duration(HeartbeatInterval) * time.Millisecond)
 	}
 
 }
 
-// performAppendEntries is the goroutine for sending AppendEntries RPC
+// performHeartbeat is the goroutine for sending heartbeat
 // and handles the reply from follower for appending log entry
-func (rf *Raft) performAppendEntries(server int, args *AppendEntriesArgs) {
+func (rf *Raft) performHeartbeat(server int, args *AppendEntriesArgs) {
+	// Stop if current server stop being a leader or is dead
+	rf.mu.Lock()
+	if rf.killed() || rf.state != Leader {
+		rf.mu.Unlock()
+		return
+	}
+	rf.mu.Unlock()
+
 	// Send RPC request
 	// Don't want to lock while sending RPC request
 	reply := &AppendEntriesReply{}
@@ -444,6 +626,32 @@ func (rf *Raft) performAppendEntries(server int, args *AppendEntriesArgs) {
 	if rf.currentTerm < reply.Term {
 		rf.convertToFollower(reply.Term)
 		return
+	}
+
+	// Success from peer, found matched log
+	if reply.Success {
+		// Update nextIndex and matchIndex
+		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+		rf.nextIndex[server] = rf.matchIndex[server] + 1
+	}
+
+	// Log inconsistent
+	// Peer doesn't have prevLogIndex in its log
+	if reply.Xterm == 0 {
+		rf.nextIndex[server] = reply.XLen
+	} else {
+		rf.nextIndex[server] = reply.XIndex
+
+		// Search the confliting term in log
+		i := len(rf.log) - 1
+		for i >= 0 && rf.log[i].Term != reply.Xterm {
+			i--
+		}
+
+		// Found the term
+		if i >= 0 {
+			rf.nextIndex[server] = rf.log[i].Index
+		}
 	}
 }
 
