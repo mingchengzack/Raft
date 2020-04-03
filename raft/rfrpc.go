@@ -267,17 +267,101 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
 		rf.convertToLeader()
 
 		// Act as a leader for each peer server
-		for s := 0; s < len(rf.peers); s++ {
-			if s == rf.me {
-				continue
-			}
-			go rf.sendHeartbeat(s)
-		}
+		// for s := 0; s < len(rf.peers); s++ {
+		// 	if s == rf.me {
+		// 		continue
+		// 	}
+		// 	go rf.sendHeartbeat(s)
+		// }
+		go rf.broadcastAppendEntries()
 	}
 }
 
 // sendAppendEntries sends a RPC request to append log entry or heartbeat
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
+	// Stop if current server stop being a leader or is dead
+	rf.mu.Lock()
+	if rf.killed() || rf.state != Leader {
+		rf.mu.Unlock()
+		return
+	}
+	rf.mu.Unlock()
+
+	// Send AppendEntries RPC
+	reply := &AppendEntriesReply{}
+	if ok := rf.peers[server].Call("Raft.AppendEntries", args, reply); !ok {
+		return
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// Process the reply only when current term doesn't change
+	// between sending RPC and receiving RPC
+	if rf.currentTerm != args.Term {
+		return
+	}
+
+	// If RPC request or response contains term T > currentTerm:
+	// set currentTerm = T, convert to follower
+	if rf.currentTerm < reply.Term {
+		rf.convertToFollower(reply.Term)
+		return
+	}
+
+	// Success from peer, found matched log
+	if reply.Success {
+		// Update nextIndex and matchIndex
+		if args.PrevLogIndex+len(args.Entries) <= rf.matchIndex[server] {
+			return
+		}
+		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+		rf.nextIndex[server] = rf.matchIndex[server] + 1
+
+		// No need to update commit index
+		index := rf.matchIndex[server]
+		if index <= rf.commitIndex {
+			return
+		}
+
+		if count, ok := rf.matchCount[index]; !ok {
+			rf.matchCount[index] = 2
+		} else {
+			rf.matchCount[index] = count + 1
+		}
+
+		// If replicated on majority of peers
+		// Rules to update commitIndex
+		replicates := rf.matchCount[index]
+		if replicates > len(rf.peers)/2 &&
+			rf.log[index-1].Term == rf.currentTerm {
+			rf.commitIndex = index
+
+			// Activate goroutines that check for apply
+			rf.cond.Broadcast()
+		}
+
+		return
+	}
+
+	// Log inconsistent
+	// Peer doesn't have prevLogIndex in its log
+	if reply.Xterm == 0 {
+		rf.nextIndex[server] = reply.XLen
+	} else {
+		rf.nextIndex[server] = reply.XIndex
+
+		// Search the confliting term in log
+		i := len(rf.log) - 1
+		for i >= 0 && rf.log[i].Term != reply.Xterm {
+			i--
+		}
+
+		// Found the term
+		if i >= 0 {
+			rf.nextIndex[server] = rf.log[i].Index
+		}
+	}
+
+	return
 }
