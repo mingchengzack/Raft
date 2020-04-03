@@ -305,7 +305,6 @@ func (rf *Raft) appendLog() {
 
 	// Make sure it's still leader and not dead
 	if rf.killed() || rf.state != Leader {
-		rf.mu.Unlock()
 		return
 	}
 
@@ -322,16 +321,8 @@ func (rf *Raft) appendLog() {
 				Entries:      rf.log[prevLogIndex:lastLogIndex],
 				LeaderCommit: rf.commitIndex,
 			}
-
 			go rf.sendAppendEntries(p, args, false)
 		}
-	}
-}
-
-// apply is a goroutine that applies commits to local state machine
-func (rf *Raft) apply(logEntries []LogEntry) {
-	for _, le := range logEntries {
-		rf.applyCh <- ApplyMsg{CommandValid: true, Command: le.Command, CommandIndex: le.Index}
 	}
 }
 
@@ -502,5 +493,12 @@ func (rf *Raft) broadcastAppendEntries() {
 
 		rf.mu.Unlock()
 		time.Sleep(time.Duration(HeartbeatInterval) * time.Millisecond)
+	}
+}
+
+// apply is a goroutine that applies commits to local state machine
+func (rf *Raft) apply(logEntries []LogEntry) {
+	for _, le := range logEntries {
+		rf.applyCh <- ApplyMsg{CommandValid: true, Command: le.Command, CommandIndex: le.Index}
 	}
 }
