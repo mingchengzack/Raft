@@ -173,13 +173,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// Append any new entries not already in the log
 		if i >= len(rf.log) {
 			rf.log = append(rf.log, le)
-			DPrintf("[Append Log] [%d] appended %v\n", rf.me, le)
 		} else {
 			// Delete confliting entries and all that follow it
 			if rf.log[i].Term != le.Term {
 				rf.log = rf.log[:i]
 				rf.log = append(rf.log, le)
-				DPrintf("[Append Log] [%d] appended %v\n", rf.me, le)
 			}
 		}
 		i++
@@ -197,7 +195,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.commitIndex = lastNewEntry
 			}
 		}
-		DPrintf("[Commit] [%d] commitIndex now is %d\n", rf.me, rf.commitIndex)
 		rf.cond.Broadcast()
 	}
 }

@@ -227,7 +227,6 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 
 	// First append log to self
 	rf.log = append(rf.log, le)
-	DPrintf("[Start] leader appended %v\n", le)
 	go rf.appendLog(le)
 
 	return
@@ -314,8 +313,6 @@ func (rf *Raft) appendLog(le LogEntry) {
 						return
 					}
 					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-					DPrintf("[Append Log] Leader[%d], knows [%d] appended %v\n", rf.me, server, le)
-					DPrintf("[Append Log] match index for [%d] is %d\n", server, rf.matchIndex[server])
 					rf.nextIndex[server] = rf.matchIndex[server] + 1
 					replicates++
 
@@ -323,8 +320,6 @@ func (rf *Raft) appendLog(le LogEntry) {
 					// Rules to update commitIndex
 					if n := rf.matchIndex[server]; replicates > len(rf.peers)/2 &&
 						n > rf.commitIndex && rf.log[n-1].Term == rf.currentTerm {
-						DPrintf("[Append Log] leader[%d] appened %v to majority\n", rf.me, le)
-						DPrintf("[Append Log] leader[%d] set commitIndex to %d\n", rf.me, n)
 						rf.commitIndex = n
 
 						// Activate goroutines that check for apply
@@ -353,7 +348,6 @@ func (rf *Raft) appendLog(le LogEntry) {
 					}
 				}
 
-				DPrintf("[Append Log] Leader retries for [%d], nextIndex is %d\n", server, rf.nextIndex[server])
 				rf.mu.Unlock()
 
 				// Retry
@@ -365,7 +359,6 @@ func (rf *Raft) appendLog(le LogEntry) {
 // apply is a goroutine that applies commits to local state machine
 func (rf *Raft) apply(logEntries []LogEntry) {
 	for _, le := range logEntries {
-		DPrintf("[Apply] [%d] applied %v\n", rf.me, le)
 		rf.applyCh <- ApplyMsg{CommandValid: true, Command: le.Command, CommandIndex: le.Index}
 	}
 }
@@ -607,7 +600,14 @@ func (rf *Raft) sendHeartbeat(server int) {
 		rf.mu.Unlock()
 
 		// Send heartbeat to given server
-		go rf.performHeartbeat(server, args)
+		success := make(chan bool)
+		go rf.performHeartbeat(server, args, success)
+
+		// RPC timeout
+		select {
+		case <-success:
+		case <-time.After(2 * time.Duration(HeartbeatInterval) * time.Millisecond):
+		}
 		time.Sleep(time.Duration(HeartbeatInterval) * time.Millisecond)
 	}
 
@@ -615,7 +615,7 @@ func (rf *Raft) sendHeartbeat(server int) {
 
 // performHeartbeat is the goroutine for sending heartbeat
 // and handles the reply from follower for appending log entry
-func (rf *Raft) performHeartbeat(server int, args *AppendEntriesArgs) {
+func (rf *Raft) performHeartbeat(server int, args *AppendEntriesArgs, success chan bool) {
 	// Stop if current server stop being a leader or is dead
 	rf.mu.Lock()
 	if rf.killed() || rf.state != Leader {
@@ -630,6 +630,7 @@ func (rf *Raft) performHeartbeat(server int, args *AppendEntriesArgs) {
 	if ok := rf.sendAppendEntries(server, args, reply); !ok {
 		return
 	}
+	success <- true
 
 	// Acquire lock
 	rf.mu.Lock()
@@ -656,8 +657,6 @@ func (rf *Raft) performHeartbeat(server int, args *AppendEntriesArgs) {
 		}
 		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
-		DPrintf("[Heartbeat] Leader[%d], knows [%d] matches\n", rf.me, server)
-		DPrintf("[Heartbeat] match index for [%d] is %d\n", server, rf.matchIndex[server])
 
 		// No need to update commit index
 		n := rf.matchIndex[server]
