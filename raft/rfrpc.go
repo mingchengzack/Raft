@@ -176,8 +176,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			// Delete confliting entries and all that follow it
 			if rf.log[i].Term != le.Term {
-				rf.log = rf.log[:i]
-				rf.log = append(rf.log, le)
+				rf.log = append(rf.log[:i:i], le)
 			}
 		}
 		i++

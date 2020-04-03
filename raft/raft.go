@@ -606,9 +606,9 @@ func (rf *Raft) sendHeartbeat(server int) {
 		// RPC timeout
 		select {
 		case <-success:
-		case <-time.After(2 * time.Duration(HeartbeatInterval) * time.Millisecond):
+			time.Sleep(time.Duration(HeartbeatInterval) * time.Millisecond)
+		case <-time.After(3 * time.Duration(HeartbeatInterval) * time.Millisecond):
 		}
-		time.Sleep(time.Duration(HeartbeatInterval) * time.Millisecond)
 	}
 
 }
