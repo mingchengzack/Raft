@@ -223,9 +223,57 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //
 
 // sendRequestVote sends a RPC request to ask for vote in leader election
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
+// and handles the response from peer, add note or not
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
+	// No longer a candidate just return
+	rf.mu.Lock()
+	if rf.killed() || rf.state != Candidate {
+		rf.mu.Unlock()
+		return
+	}
+	rf.mu.Unlock() // Don't want to lock while sending RPC request
+
+	// Send Requestvote RPC
+	reply := &RequestVoteReply{}
+	if ok := rf.peers[server].Call("Raft.RequestVote", args, reply); !ok {
+		return
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// Process the reply only when current term doesn't change
+	// between sending RPC and receiving RPC
+	// and is still a candidate and not dead
+	if rf.killed() || rf.currentTerm != args.Term ||
+		rf.state != Candidate {
+		return
+	}
+
+	// If RPC request or response contains term T > currentTerm:
+	// set currentTerm = T, convert to follower
+	if rf.currentTerm < reply.Term {
+		rf.convertToFollower(reply.Term)
+		return
+	}
+
+	// If got vote
+	if reply.VoteGranted {
+		rf.voteCount++
+	}
+
+	// Candidate has majority of votes becomes leader
+	if rf.voteCount > len(rf.peers)/2 {
+		rf.convertToLeader()
+
+		// Act as a leader for each peer server
+		for s := 0; s < len(rf.peers); s++ {
+			if s == rf.me {
+				continue
+			}
+			go rf.sendHeartbeat(s)
+		}
+	}
 }
 
 // sendAppendEntries sends a RPC request to append log entry or heartbeat
