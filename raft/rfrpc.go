@@ -267,18 +267,12 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
 		rf.convertToLeader()
 
 		// Act as a leader for each peer server
-		// for s := 0; s < len(rf.peers); s++ {
-		// 	if s == rf.me {
-		// 		continue
-		// 	}
-		// 	go rf.sendHeartbeat(s)
-		// }
 		go rf.broadcastAppendEntries()
 	}
 }
 
 // sendAppendEntries sends a RPC request to append log entry or heartbeat
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, isHeartbeat bool) {
 	// Stop if current server stop being a leader or is dead
 	rf.mu.Lock()
 	if rf.killed() || rf.state != Leader {
@@ -298,7 +292,8 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 
 	// Process the reply only when current term doesn't change
 	// between sending RPC and receiving RPC
-	if rf.currentTerm != args.Term {
+	if rf.killed() || rf.currentTerm != args.Term ||
+		rf.state != Leader {
 		return
 	}
 
@@ -361,6 +356,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 		if i >= 0 {
 			rf.nextIndex[server] = rf.log[i].Index
 		}
+	}
+
+	// Retry if not heartbeat
+	if !isHeartbeat {
+		go rf.appendLog()
 	}
 
 	return

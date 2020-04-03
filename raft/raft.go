@@ -292,14 +292,14 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 		Term:    term,
 	}
 	rf.log = append(rf.log, le)
-	go rf.appendLog(le)
+	go rf.appendLog()
 
 	return
 }
 
 // appendLog is a goroutine that tries to append log itself
 // and then try to replicate it to other servers
-func (rf *Raft) appendLog(le LogEntry) {
+func (rf *Raft) appendLog() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -323,7 +323,7 @@ func (rf *Raft) appendLog(le LogEntry) {
 				LeaderCommit: rf.commitIndex,
 			}
 
-			go rf.sendAppendEntries(p, args)
+			go rf.sendAppendEntries(p, args, false)
 		}
 	}
 }
@@ -496,7 +496,7 @@ func (rf *Raft) broadcastAppendEntries() {
 					LeaderCommit: rf.commitIndex,
 				}
 
-				go rf.sendAppendEntries(p, args)
+				go rf.sendAppendEntries(p, args, true)
 			}
 		}
 
