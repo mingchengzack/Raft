@@ -118,7 +118,7 @@ func (rf *Raft) GetState() (int, bool) {
 	defer rf.mu.Unlock()
 
 	term := rf.currentTerm
-	isLeader := rf.state == Leader
+	isLeader := (rf.state == Leader && !rf.killed())
 
 	return term, isLeader
 }
@@ -271,13 +271,12 @@ func (rf *Raft) appendLog(le LogEntry) {
 				}
 
 				prevLogIndex, prevLogTerm := rf.getPrevLog(server)
-				last, _ := rf.getLastLog()
 				args := &AppendEntriesArgs{
 					Term:         rf.currentTerm,
 					LeaderID:     rf.me,
 					PrevLogIndex: prevLogIndex,
 					PrevLogTerm:  prevLogTerm,
-					Entries:      rf.log[prevLogIndex:last],
+					Entries:      rf.log[prevLogIndex:lastLogIndex],
 					LeaderCommit: rf.commitIndex,
 				}
 				rf.mu.Unlock()
@@ -310,7 +309,7 @@ func (rf *Raft) appendLog(le LogEntry) {
 				// Success from peer, found matched log
 				if reply.Success {
 					// Update nextIndex and matchIndex
-					if args.PrevLogIndex+len(args.Entries) < rf.matchIndex[server] {
+					if args.PrevLogIndex+len(args.Entries) <= rf.matchIndex[server] {
 						rf.mu.Unlock()
 						return
 					}
@@ -652,6 +651,9 @@ func (rf *Raft) performHeartbeat(server int, args *AppendEntriesArgs) {
 	// Success from peer, found matched log
 	if reply.Success {
 		// Update nextIndex and matchIndex
+		if args.PrevLogIndex+len(args.Entries) <= rf.matchIndex[server] {
+			return
+		}
 		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
 		DPrintf("[Heartbeat] Leader[%d], knows [%d] matches\n", rf.me, server)
