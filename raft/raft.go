@@ -157,6 +157,9 @@ func (rf *Raft) convertToFollower(term int) {
 	rf.currentTerm = term
 	rf.votedFor = -1
 	rf.voteCount = 0
+
+	// Fire election timeout for leader election
+	go rf.electionTimeout()
 }
 
 // ConvertToCandidate converts the server to a candidate
@@ -382,9 +385,9 @@ func (rf *Raft) electionTimeout() {
 		startTime := time.Now()
 		time.Sleep(time.Duration(electionTimeout) * time.Millisecond)
 
-		// Check the current server is dead
+		// Check the current server is dead or becomes leader
 		rf.mu.Lock()
-		if rf.killed() {
+		if rf.killed() || rf.state == Leader {
 			rf.mu.Unlock()
 			return
 		}
