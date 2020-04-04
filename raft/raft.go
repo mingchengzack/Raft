@@ -67,8 +67,8 @@ const (
 
 	// HeartbeatInterval (ms)
 	// Make sure leader sends heartbeat RPCs no more than ten times per second
-	// 8 times per second
-	HeartbeatInterval = 120
+	// 10 times per second
+	HeartbeatInterval = 100
 )
 
 // LogEntry defines the replicated log entry
@@ -109,9 +109,8 @@ type Raft struct {
 	voteCount int // current count of received votes
 
 	// Volatile state on leaders
-	nextIndex  []int       // For each server, index of the next log entry to send (initialized to leader last log index + 1)
-	matchIndex []int       // For each server, index of highest log entry known to be replicated on server (initialized to 0)
-	matchCount map[int]int // Count for how many servers match specific index in log
+	nextIndex  []int // For each server, index of the next log entry to send (initialized to leader last log index + 1)
+	matchIndex []int // For each server, index of highest log entry known to be replicated on server (initialized to 0)
 }
 
 //
@@ -189,9 +188,6 @@ func (rf *Raft) convertToLeader() {
 		rf.nextIndex[i] = lastLogIndex + 1
 		rf.matchIndex[i] = 0
 	}
-	rf.matchCount = make(map[int]int)
-
-	rf.electionTimer = time.Now()
 }
 
 // getLastLog is a helper function that gets the last log's index and term
@@ -295,38 +291,8 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 		Term:    term,
 	}
 	rf.log = append(rf.log, le)
-	go rf.appendLog()
 
 	return
-}
-
-// appendLog is a goroutine that tries to append log itself
-// and then try to replicate it to other servers
-func (rf *Raft) appendLog() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	// Make sure it's still leader and not dead
-	if rf.killed() || rf.state != Leader {
-		return
-	}
-
-	// Send each peer AppendEntries RPC
-	lastLogIndex, _ := rf.getLastLog()
-	for p := 0; p < len(rf.peers); p++ {
-		if p != rf.me {
-			prevLogIndex, prevLogTerm := rf.getPrevLog(p)
-			args := &AppendEntriesArgs{
-				Term:         rf.currentTerm,
-				LeaderID:     rf.me,
-				PrevLogIndex: prevLogIndex,
-				PrevLogTerm:  prevLogTerm,
-				Entries:      rf.log[prevLogIndex:lastLogIndex],
-				LeaderCommit: rf.commitIndex,
-			}
-			go rf.sendAppendEntries(p, args, false)
-		}
-	}
 }
 
 //
@@ -476,8 +442,31 @@ func (rf *Raft) broadcastAppendEntries() {
 			return
 		}
 
-		// Send each peer AppendEntries RPC
+		// Check if we need to update commit index
+		// If there exists an N such that N > commitIndex, a majority
+		// of matchIndex[i] ≥ N, and log[N].term == currentTerm
+		// set commitIndex = N
 		lastLogIndex, _ := rf.getLastLog()
+		index := rf.commitIndex
+		for i := rf.commitIndex + 1; i <= lastLogIndex; i++ {
+			replicates := 1
+			for p := range rf.peers {
+				if p != rf.me && rf.matchIndex[p] >= i && rf.log[i-1].Term == rf.currentTerm {
+					replicates++
+				}
+			}
+			if replicates > len(rf.peers)/2 {
+				index = i
+			}
+		}
+		if index != rf.commitIndex {
+			rf.commitIndex = index
+
+			// Activate goroutines that check for apply
+			rf.cond.Broadcast()
+		}
+
+		// Send each peer AppendEntries RPC
 		for p := 0; p < len(rf.peers); p++ {
 			if p != rf.me {
 				prevLogIndex, prevLogTerm := rf.getPrevLog(p)
@@ -489,8 +478,7 @@ func (rf *Raft) broadcastAppendEntries() {
 					Entries:      rf.log[prevLogIndex:lastLogIndex],
 					LeaderCommit: rf.commitIndex,
 				}
-
-				go rf.sendAppendEntries(p, args, true)
+				go rf.sendAppendEntries(p, args)
 			}
 		}
 

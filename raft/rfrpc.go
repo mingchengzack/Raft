@@ -272,7 +272,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
 }
 
 // sendAppendEntries sends a RPC request to append log entry or heartbeat
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, isHeartbeat bool) {
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 	// Stop if current server stop being a leader or is dead
 	rf.mu.Lock()
 	if rf.killed() || rf.state != Leader {
@@ -313,29 +313,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, isHeartbe
 		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
 
-		// No need to update commit index
-		index := rf.matchIndex[server]
-		if index <= rf.commitIndex {
-			return
-		}
-
-		if count, ok := rf.matchCount[index]; !ok {
-			rf.matchCount[index] = 2
-		} else {
-			rf.matchCount[index] = count + 1
-		}
-
-		// If replicated on majority of peers
-		// Rules to update commitIndex
-		replicates := rf.matchCount[index]
-		if replicates > len(rf.peers)/2 &&
-			rf.log[index-1].Term == rf.currentTerm {
-			rf.commitIndex = index
-
-			// Activate goroutines that check for apply
-			rf.cond.Broadcast()
-		}
-
 		return
 	}
 
@@ -356,11 +333,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, isHeartbe
 		if i >= 0 {
 			rf.nextIndex[server] = rf.log[i].Index
 		}
-	}
-
-	// Retry if not heartbeat
-	if !isHeartbeat {
-		go rf.appendLog()
 	}
 
 	return
