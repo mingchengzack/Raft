@@ -404,8 +404,8 @@ func (rf *Raft) checkCommit() {
 func (rf *Raft) leaderElection() {
 	rf.mu.Lock()
 
-	// Make sure it's not dead
-	if rf.killed() {
+	// Make sure it's not dead and still a candidate
+	if rf.killed() || rf.state != Candidate {
 		rf.mu.Unlock()
 		return
 	}
