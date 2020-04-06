@@ -367,7 +367,7 @@ func (rf *Raft) electionTimeout() {
 				rf.convertToCandidate()
 
 				// Broadcast requests votes to perform leader election
-				go rf.leaderElection()
+				go rf.broadcastRequestVote()
 			}
 		}
 
@@ -400,8 +400,8 @@ func (rf *Raft) checkCommit() {
 	}
 }
 
-// leaderElection is the goroutine that starts the leader election process
-func (rf *Raft) leaderElection() {
+// broadcastRequestVote is the goroutine that starts the leader election process
+func (rf *Raft) broadcastRequestVote() {
 	rf.mu.Lock()
 
 	// Make sure it's not dead and still a candidate

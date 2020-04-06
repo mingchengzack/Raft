@@ -266,7 +266,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
 	if rf.voteCount > len(rf.peers)/2 {
 		rf.convertToLeader()
 
-		// Act as a leader for each peer server
+		// Act as a leader (send heartbeat and AppendEntry RPC)
+		// for each peer server
 		go rf.broadcastAppendEntries()
 	}
 }
