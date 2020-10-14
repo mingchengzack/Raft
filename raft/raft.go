@@ -339,14 +339,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
 
+	// Initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
+
 	// Fire election timeout for leader election
 	go rf.electionTimeout()
 
 	// Fire check commit goroutine that apply Log entries
 	go rf.checkCommit()
-
-	// Initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 
 	return rf
 }
