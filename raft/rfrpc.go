@@ -1,6 +1,8 @@
 package raft
 
-import "time"
+import (
+	"time"
+)
 
 //
 // Raft RPC definitions and handlers
@@ -25,7 +27,7 @@ type RequestVoteReply struct {
 // Assuming lock is acquired
 func (rf *Raft) isMoreUpToDate(candidateIndex, candidateTerm int) bool {
 	// Current log is empty, no way it's more up to date
-	if len(rf.log) == 0 {
+	if len(rf.Log) == 0 {
 		return false
 	}
 
@@ -50,30 +52,32 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 
 	// Set reply
-	reply.Term = rf.currentTerm
+	reply.Term = rf.CurrentTerm
 	reply.VoteGranted = false
 
 	// Receives stale term request
-	if rf.currentTerm > args.Term {
+	if rf.CurrentTerm > args.Term {
 		return
 	}
 
 	// If RPC request or response contains term T > currentTerm:
 	// set currentTerm = T, convert to follower
-	if rf.currentTerm < args.Term {
+	if rf.CurrentTerm < args.Term {
 		rf.convertToFollower(args.Term)
 	}
 
 	// If votedFor is null or candidateId
 	// and candidate’s log is at least as up-to-date as receiver’s log
 	// grant vote
-	if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) &&
+	if (rf.VotedFor == -1 || rf.VotedFor == args.CandidateID) &&
 		!rf.isMoreUpToDate(args.LastLogIndex, args.LastLogTerm) {
-		rf.votedFor = args.CandidateID
+		rf.VotedFor = args.CandidateID
 		reply.VoteGranted = true
 
 		// Reset election timer only if GRANTING the vote
 		rf.electionTimer = time.Now()
+
+		rf.persist()
 	}
 }
 
@@ -109,20 +113,20 @@ func (rf *Raft) contains(prevLogIndex, prevLogTerm int, reply *AppendEntriesRepl
 	}
 
 	// prevLogIndex points beyond the end of the log
-	if len(rf.log) < prevLogIndex {
+	if len(rf.Log) < prevLogIndex {
 		return false
 	}
 
 	// Conflicting term
-	if term := rf.log[prevLogIndex-1].Term; term != prevLogTerm {
+	if term := rf.Log[prevLogIndex-1].Term; term != prevLogTerm {
 		reply.Xterm = term
 
 		// Find index of first entry with that confliting term
 		i := prevLogIndex - 1
-		for i > 0 && rf.log[i-1].Term == term {
+		for i > 0 && rf.Log[i-1].Term == term {
 			i--
 		}
-		reply.XIndex = rf.log[i].Index
+		reply.XIndex = rf.Log[i].Index
 
 		return false
 	}
@@ -136,22 +140,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	// Set reply
-	reply.Term = rf.currentTerm
+	reply.Term = rf.CurrentTerm
 	reply.Success = false
 	reply.Xterm = 0
 	reply.XIndex = 0
-	reply.XLen = len(rf.log)
+	reply.XLen = len(rf.Log)
 
 	// Receives stale term request
-	if rf.currentTerm > args.Term {
+	if rf.CurrentTerm > args.Term {
 		return
 	}
 
 	// If RPC request or response contains term T > currentTerm
 	// Or it is a candidate and receive heartbeat from leader
 	// set currentTerm = T, convert to follower
-	if rf.currentTerm < args.Term ||
-		(rf.currentTerm == args.Term && rf.state == Candidate) {
+	if rf.CurrentTerm < args.Term ||
+		(rf.CurrentTerm == args.Term && rf.state == Candidate) {
 		rf.convertToFollower(args.Term)
 	}
 
@@ -171,12 +175,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	i := args.PrevLogIndex
 	for _, le := range args.Entries {
 		// Append any new entries not already in the log
-		if i >= len(rf.log) {
-			rf.log = append(rf.log, le)
+		if i >= len(rf.Log) {
+			rf.Log = append(rf.Log, le)
 		} else {
 			// Delete confliting entries and all that follow it
-			if rf.log[i].Term != le.Term {
-				rf.log = append(rf.log[:i:i], le)
+			if rf.Log[i].Term != le.Term {
+				rf.Log = append(rf.Log[:i:i], le)
 			}
 		}
 		i++
@@ -196,6 +200,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		rf.cond.Broadcast()
 	}
+
+	rf.persist()
 }
 
 // For sending and receiving RPC
@@ -245,14 +251,14 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
 	// Process the reply only when current term doesn't change
 	// between sending RPC and receiving RPC
 	// and is still a candidate and not dead
-	if rf.killed() || rf.currentTerm != args.Term ||
+	if rf.killed() || rf.CurrentTerm != args.Term ||
 		rf.state != Candidate {
 		return
 	}
 
 	// If RPC request or response contains term T > currentTerm:
 	// set currentTerm = T, convert to follower
-	if rf.currentTerm < reply.Term {
+	if rf.CurrentTerm < reply.Term {
 		rf.convertToFollower(reply.Term)
 		return
 	}
@@ -293,14 +299,14 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 
 	// Process the reply only when current term doesn't change
 	// between sending RPC and receiving RPC
-	if rf.killed() || rf.currentTerm != args.Term ||
+	if rf.killed() || rf.CurrentTerm != args.Term ||
 		rf.state != Leader {
 		return
 	}
 
 	// If RPC request or response contains term T > currentTerm:
 	// set currentTerm = T, convert to follower
-	if rf.currentTerm < reply.Term {
+	if rf.CurrentTerm < reply.Term {
 		rf.convertToFollower(reply.Term)
 		return
 	}
@@ -320,19 +326,19 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 	// Log inconsistent
 	// Peer doesn't have prevLogIndex in its log
 	if reply.Xterm == 0 {
-		rf.nextIndex[server] = reply.XLen
+		rf.nextIndex[server] = reply.XLen + 1
 	} else {
 		rf.nextIndex[server] = reply.XIndex
 
 		// Search the confliting term in log
-		i := len(rf.log) - 1
-		for i >= 0 && rf.log[i].Term != reply.Xterm {
+		i := len(rf.Log) - 1
+		for i >= 0 && rf.Log[i].Term != reply.Xterm {
 			i--
 		}
 
 		// Found the term
 		if i >= 0 {
-			rf.nextIndex[server] = rf.log[i].Index
+			rf.nextIndex[server] = rf.Log[i].Index
 		}
 	}
 
