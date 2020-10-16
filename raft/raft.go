@@ -404,10 +404,12 @@ func (rf *Raft) checkCommit() {
 			rf.cond.Wait() // Should wakes up after commitIndex changes
 		}
 
-		// Applied Log entries to local state
-		rf.apply(rf.Log[rf.lastApplied:rf.commitIndex])
+		l := rf.Log[rf.lastApplied:rf.commitIndex]
 		rf.lastApplied = rf.commitIndex
 		rf.mu.Unlock()
+
+		// Applied Log entries to local state
+		rf.apply(l)
 	}
 }
 
